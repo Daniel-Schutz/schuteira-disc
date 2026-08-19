@@ -1,16 +1,18 @@
-import { joinRoom, selfId } from "@trystero-p2p/torrent";
+import { joinRoom, selfId } from "@trystero-p2p/mqtt";
 import { getTurnConfig } from "./ice";
 
 export const APP_ID = "schuteiraDisc";
 export const ROOM_ID = "global";
 
 type StreamKind = "audio" | "screen";
+type LinkState = "connecting" | "connected" | "failed";
 
 type PeerState = {
   nick: string;
   muted: boolean;
   sharing: boolean;
   speaking: boolean;
+  link: LinkState;
 };
 
 export type PeerInfo = PeerState & {
@@ -37,7 +39,7 @@ type CallHandlers = {
 };
 
 function emptyPeer(): PeerState {
-  return { nick: "Alguém", muted: false, sharing: false, speaking: false };
+  return { nick: "Alguém", muted: false, sharing: false, speaking: false, link: "connecting" };
 }
 
 function watchSpeaking(
@@ -103,8 +105,9 @@ export async function startCall(
   const room = joinRoom(
     {
       appId: APP_ID,
-      trickleIce: true,
       turnConfig,
+      relayConfig: { redundancy: 4 },
+      rtcConfig: { iceCandidatePoolSize: 8 },
     },
     ROOM_ID,
   );
@@ -124,6 +127,7 @@ export async function startCall(
     muted: localMuted,
     sharing: Boolean(screenStream),
     speaking: false,
+    link: "connected",
   });
 
   const emitPeers = () => {
@@ -174,10 +178,48 @@ export async function startCall(
     if (!sharing) handlers.onRemoteScreen(peerId, null);
   };
 
+  const iceRestarted = new Set<string>();
+
+  const watchLink = (peerId: string) => {
+    const pc = room.getPeers()[peerId];
+    if (!pc) return;
+
+    const sync = () => {
+      const state = pc.connectionState;
+      if (state === "connected") {
+        setPeer(peerId, { link: "connected" });
+        sendMedia(peerId);
+        sendPresence(peerId);
+        return;
+      }
+      if (state === "failed") {
+        setPeer(peerId, { link: "failed" });
+        if (!iceRestarted.has(peerId)) {
+          iceRestarted.add(peerId);
+          try {
+            pc.restartIce();
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+      if (state === "disconnected") {
+        setPeer(peerId, { link: "connecting" });
+        return;
+      }
+      setPeer(peerId, { link: "connecting" });
+    };
+
+    pc.addEventListener("connectionstatechange", sync);
+    sync();
+  };
+
   room.onPeerJoin = (peerId) => {
     setPeer(peerId, emptyPeer());
     sendPresence(peerId);
     sendMedia(peerId);
+    watchLink(peerId);
     const others = Object.keys(room.getPeers()).length;
     handlers.onStatus(others ? `${others + 1} pessoas na sala` : "Só você por enquanto");
   };

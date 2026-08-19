@@ -48,7 +48,7 @@ function renderPeers(peers: PeerInfo[]) {
   peersEl.replaceChildren(
     ...peers.map((peer) => {
       const li = document.createElement("li");
-      li.className = `peer${peer.isSelf ? " self" : ""}${peer.speaking && !peer.muted ? " speaking" : ""}`;
+      li.className = `peer${peer.isSelf ? " self" : ""}${peer.speaking && !peer.muted ? " speaking" : ""}${!peer.isSelf && peer.link === "failed" ? " failed" : ""}`;
       const avatar = document.createElement("div");
       avatar.className = "avatar";
       avatar.textContent = initials(peer.nick) || "?";
@@ -58,7 +58,21 @@ function renderPeers(peers: PeerInfo[]) {
       name.textContent = peer.isSelf ? `${peer.nick} (você)` : peer.nick;
       const state = document.createElement("span");
       const bits = [
-        peer.muted ? "mudo" : peer.speaking ? "falando" : "conectado",
+        peer.isSelf
+          ? peer.muted
+            ? "mudo"
+            : peer.speaking
+              ? "falando"
+              : "conectado"
+          : peer.link === "failed"
+            ? "sem conexão"
+            : peer.link === "connecting"
+              ? "conectando…"
+              : peer.muted
+                ? "mudo"
+                : peer.speaking
+                  ? "falando"
+                  : "conectado",
         peer.sharing ? "compartilhando tela" : "",
       ].filter(Boolean);
       state.textContent = bits.join(" · ");
