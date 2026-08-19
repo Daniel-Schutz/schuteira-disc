@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Sala única de áudio e compartilhamento de tela, sem servidor",
+  "description": "Sala única de áudio e compartilhamento de tela via LiveKit Cloud",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -14,6 +14,7 @@
     "vite": "^8.2.1"
   },
   "dependencies": {
-    "trystero": "^0.25.3"
+    "livekit-client": "^2.22.0",
+    "livekit-server-sdk": "^2.18.0"
   }
 }

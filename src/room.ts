@@ -1,10 +1,16 @@
-import { joinRoom, selfId } from "trystero";
-import { getTurnConfig } from "./ice";
+import {
+  ConnectionState,
+  Room,
+  RoomEvent,
+  Track,
+  type Participant,
+  type RemoteParticipant,
+  type RemoteTrack,
+  type RemoteTrackPublication,
+} from "livekit-client";
 
-export const APP_ID = "schuteiraDisc";
-export const ROOM_ID = "global";
+export const ROOM_NAME = "schuteiraDisc";
 
-type StreamKind = "audio" | "screen";
 type LinkState = "connecting" | "connected" | "failed";
 
 type PeerState = {
@@ -38,292 +44,241 @@ type CallHandlers = {
   onError: (message: string) => void;
 };
 
-function emptyPeer(): PeerState {
-  return { nick: "Alguém", muted: false, sharing: false, speaking: false, link: "connecting" };
+export class TokenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TokenError";
+  }
 }
 
-function watchSpeaking(
-  stream: MediaStream,
-  audioCtx: AudioContext,
-  onChange: (speaking: boolean) => void,
-): () => void {
-  const track = stream.getAudioTracks()[0];
-  if (!track) return () => {};
+function mediaStreamFromTrack(track: { mediaStream?: MediaStream; mediaStreamTrack: MediaStreamTrack }) {
+  return track.mediaStream ?? new MediaStream([track.mediaStreamTrack]);
+}
 
-  const source = audioCtx.createMediaStreamSource(stream);
-  const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 512;
-  source.connect(analyser);
-  const data = new Uint8Array(analyser.frequencyBinCount);
-  let speaking = false;
-  let raf = 0;
-  let stopped = false;
-
-  const tick = () => {
-    if (stopped) return;
-    analyser.getByteTimeDomainData(data);
-    let sum = 0;
-    for (const sample of data) {
-      const v = (sample - 128) / 128;
-      sum += v * v;
-    }
-    const next = Math.sqrt(sum / data.length) > 0.045 && track.enabled;
-    if (next !== speaking) {
-      speaking = next;
-      onChange(speaking);
-    }
-    raf = requestAnimationFrame(tick);
+function participantState(participant: Participant, link: LinkState): PeerState {
+  return {
+    nick: participant.name || participant.identity,
+    muted: !participant.isMicrophoneEnabled,
+    sharing: Boolean(participant.getTrackPublication(Track.Source.ScreenShare)),
+    speaking: participant.isSpeaking,
+    link,
   };
-  tick();
+}
 
-  return () => {
-    stopped = true;
-    cancelAnimationFrame(raf);
-    source.disconnect();
-    analyser.disconnect();
-  };
+async function fetchJoinToken(name: string): Promise<string> {
+  const response = await fetch(`/api/token?name=${encodeURIComponent(name)}`);
+  if (!response.ok) {
+    throw new TokenError("Não deu para entrar. Confira as chaves do LiveKit.");
+  }
+  const body = (await response.json()) as { token?: string };
+  if (!body.token) {
+    throw new TokenError("Não deu para entrar. Confira as chaves do LiveKit.");
+  }
+  return body.token;
 }
 
 export async function startCall(
   nickname: string,
   handlers: CallHandlers,
 ): Promise<CallSession> {
-  const audioCtx = new AudioContext();
-  if (audioCtx.state === "suspended") await audioCtx.resume();
+  const livekitUrl = import.meta.env.VITE_LIVEKIT_URL;
+  if (!livekitUrl) {
+    throw new TokenError("Falta VITE_LIVEKIT_URL no ambiente.");
+  }
 
-  const micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
+  const token = await fetchJoinToken(nickname);
+  const room = new Room({
+    adaptiveStream: true,
+    dynacast: true,
+    audioCaptureDefaults: {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
     },
-    video: false,
   });
 
-  const turnConfig = await getTurnConfig();
+  const screenMix = new Map<string, MediaStream>();
 
-  const room = joinRoom(
-    {
-      appId: APP_ID,
-      turnConfig,
-      relayConfig: { redundancy: 4 },
-      rtcConfig: { iceCandidatePoolSize: 8 },
-    },
-    ROOM_ID,
-  );
-
-  const nickAction = room.makeAction<string>("nick");
-  const muteAction = room.makeAction<{ muted: boolean }>("mute");
-  const screenAction = room.makeAction<{ sharing: boolean }>("screen");
-
-  const peers = new Map<string, PeerState>();
-  const stopSpeaking = new Map<string, () => void>();
-  let screenStream: MediaStream | null = null;
-  let localMuted = false;
-  let left = false;
-
-  const selfState = (): PeerState => ({
-    nick: nickname,
-    muted: localMuted,
-    sharing: Boolean(screenStream),
-    speaking: false,
-    link: "connected",
-  });
+  const roomLink = (): LinkState => {
+    if (room.state === ConnectionState.Connected) return "connected";
+    if (room.state === ConnectionState.Disconnected) return "failed";
+    return "connecting";
+  };
 
   const emitPeers = () => {
+    const link = roomLink();
     const list: PeerInfo[] = [
-      { id: selfId, isSelf: true, ...selfState(), speaking: peers.get(selfId)?.speaking ?? false },
+      {
+        id: room.localParticipant.identity,
+        isSelf: true,
+        ...participantState(room.localParticipant, "connected"),
+      },
     ];
-    for (const [id, state] of peers) {
-      if (id === selfId) continue;
-      list.push({ id, isSelf: false, ...state });
+    for (const participant of room.remoteParticipants.values()) {
+      list.push({
+        id: participant.identity,
+        isSelf: false,
+        ...participantState(participant, link),
+      });
     }
     handlers.onPeers(list);
   };
 
-  const setPeer = (id: string, patch: Partial<PeerState>) => {
-    const current = peers.get(id) ?? emptyPeer();
-    peers.set(id, { ...current, ...patch });
-    emitPeers();
+  const statusCount = () => {
+    const total = room.remoteParticipants.size + 1;
+    handlers.onStatus(total === 1 ? "Só você por enquanto" : `${total} pessoas na sala`);
   };
 
-  const sendPresence = (peerId?: string) => {
-    const target = peerId ? { target: peerId } : undefined;
-    nickAction.send(nickname, target);
-    muteAction.send({ muted: localMuted }, target);
-    screenAction.send({ sharing: Boolean(screenStream) }, target);
-  };
-
-  const sendMedia = (peerId?: string) => {
-    const target = peerId ? { target: peerId } : undefined;
-    room.addStream(micStream, { ...target, metadata: { kind: "audio" satisfies StreamKind } });
-    if (screenStream) {
-      room.addStream(screenStream, {
-        ...target,
-        metadata: { kind: "screen" satisfies StreamKind },
-      });
-    }
-  };
-
-  setPeer(selfId, selfState());
-  stopSpeaking.set(
-    selfId,
-    watchSpeaking(micStream, audioCtx, (speaking) => setPeer(selfId, { speaking })),
-  );
-
-  nickAction.onMessage = (nick, { peerId }) => setPeer(peerId, { nick });
-  muteAction.onMessage = ({ muted }, { peerId }) => setPeer(peerId, { muted });
-  screenAction.onMessage = ({ sharing }, { peerId }) => {
-    setPeer(peerId, { sharing });
-    if (!sharing) handlers.onRemoteScreen(peerId, null);
-  };
-
-  const iceRestarted = new Set<string>();
-
-  const watchLink = (peerId: string) => {
-    const pc = room.getPeers()[peerId];
-    if (!pc) return;
-
-    const sync = () => {
-      const state = pc.connectionState;
-      if (state === "connected") {
-        setPeer(peerId, { link: "connected" });
-        sendMedia(peerId);
-        sendPresence(peerId);
-        return;
-      }
-      if (state === "failed") {
-        setPeer(peerId, { link: "failed" });
-        if (!iceRestarted.has(peerId)) {
-          iceRestarted.add(peerId);
-          try {
-            pc.restartIce();
-          } catch {
-            // ignore
-          }
-        }
-        return;
-      }
-      if (state === "disconnected") {
-        setPeer(peerId, { link: "connecting" });
-        return;
-      }
-      setPeer(peerId, { link: "connecting" });
-    };
-
-    pc.addEventListener("connectionstatechange", sync);
-    sync();
-  };
-
-  room.onPeerJoin = (peerId) => {
-    setPeer(peerId, emptyPeer());
-    sendPresence(peerId);
-    sendMedia(peerId);
-    watchLink(peerId);
-    const others = Object.keys(room.getPeers()).length;
-    handlers.onStatus(others ? `${others + 1} pessoas na sala` : "Só você por enquanto");
-  };
-
-  room.onPeerLeave = (peerId) => {
-    stopSpeaking.get(peerId)?.();
-    stopSpeaking.delete(peerId);
-    peers.delete(peerId);
-    handlers.onRemoteAudio(peerId, null);
-    handlers.onRemoteScreen(peerId, null);
-    emitPeers();
-    const others = Object.keys(room.getPeers()).length;
-    handlers.onStatus(others ? `${others + 1} pessoas na sala` : "Só você por enquanto");
-  };
-
-  room.onPeerStream = (stream, peerId, metadata) => {
-    const kind: StreamKind =
-      metadata && typeof metadata === "object" && "kind" in metadata
-        ? ((metadata as { kind?: StreamKind }).kind ?? "audio")
-        : stream.getVideoTracks().length
-          ? "screen"
-          : "audio";
-
-    if (kind === "screen" || stream.getVideoTracks().length > 0) {
-      setPeer(peerId, { sharing: true });
-      handlers.onRemoteScreen(peerId, stream);
-      const video = stream.getVideoTracks()[0];
-      video?.addEventListener("ended", () => {
-        setPeer(peerId, { sharing: false });
-        handlers.onRemoteScreen(peerId, null);
-      });
+  const publishScreen = (peerId: string) => {
+    const mixed = screenMix.get(peerId);
+    if (!mixed || mixed.getVideoTracks().length === 0) {
+      handlers.onRemoteScreen(peerId, null);
       return;
     }
-
-    stopSpeaking.get(peerId)?.();
-    stopSpeaking.set(
-      peerId,
-      watchSpeaking(stream, audioCtx, (speaking) => setPeer(peerId, { speaking })),
-    );
-    handlers.onRemoteAudio(peerId, stream);
+    handlers.onRemoteScreen(peerId, mixed);
   };
 
-  sendMedia();
-  sendPresence();
-  handlers.onStatus("Procurando gente na sala…");
-  window.setTimeout(() => {
-    if (left || Object.keys(room.getPeers()).length > 0) return;
-    handlers.onStatus("Só você por enquanto");
-  }, 8000);
-
-  const stopScreenShare = () => {
-    if (!screenStream) return;
-    room.removeStream(screenStream);
-    for (const track of screenStream.getTracks()) track.stop();
-    screenStream = null;
-    screenAction.send({ sharing: false });
-    setPeer(selfId, { sharing: false });
-    handlers.onLocalScreen(null);
+  const addScreenTrack = (peerId: string, track: RemoteTrack) => {
+    let mixed = screenMix.get(peerId);
+    if (!mixed) {
+      mixed = new MediaStream();
+      screenMix.set(peerId, mixed);
+    }
+    const mediaTrack = track.mediaStreamTrack;
+    if (!mixed.getTracks().some((existing) => existing.id === mediaTrack.id)) {
+      mixed.addTrack(mediaTrack);
+    }
+    publishScreen(peerId);
   };
+
+  const removeScreenTrack = (peerId: string, track: RemoteTrack) => {
+    const mixed = screenMix.get(peerId);
+    if (!mixed) return;
+    mixed.removeTrack(track.mediaStreamTrack);
+    if (mixed.getVideoTracks().length === 0) {
+      screenMix.delete(peerId);
+      handlers.onRemoteScreen(peerId, null);
+      return;
+    }
+    publishScreen(peerId);
+  };
+
+  const handleRemoteTrack = (
+    track: RemoteTrack,
+    _publication: RemoteTrackPublication,
+    participant: RemoteParticipant,
+  ) => {
+    if (track.source === Track.Source.Microphone) {
+      handlers.onRemoteAudio(participant.identity, mediaStreamFromTrack(track));
+    }
+    if (track.source === Track.Source.ScreenShare || track.source === Track.Source.ScreenShareAudio) {
+      addScreenTrack(participant.identity, track);
+    }
+    emitPeers();
+  };
+
+  room.on(RoomEvent.ParticipantConnected, () => {
+    emitPeers();
+    statusCount();
+  });
+
+  room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+    screenMix.delete(participant.identity);
+    handlers.onRemoteAudio(participant.identity, null);
+    handlers.onRemoteScreen(participant.identity, null);
+    emitPeers();
+    statusCount();
+  });
+
+  room.on(RoomEvent.TrackSubscribed, handleRemoteTrack);
+
+  room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
+    if (track.source === Track.Source.Microphone) {
+      handlers.onRemoteAudio(participant.identity, null);
+    }
+    if (track.source === Track.Source.ScreenShare || track.source === Track.Source.ScreenShareAudio) {
+      removeScreenTrack(participant.identity, track);
+    }
+    emitPeers();
+  });
+
+  room.on(RoomEvent.ActiveSpeakersChanged, () => emitPeers());
+  room.on(RoomEvent.TrackMuted, () => emitPeers());
+  room.on(RoomEvent.TrackUnmuted, () => emitPeers());
+  room.on(RoomEvent.ParticipantMetadataChanged, () => emitPeers());
+
+  room.on(RoomEvent.LocalTrackPublished, (publication) => {
+    if (publication.source === Track.Source.ScreenShare && publication.track) {
+      handlers.onLocalScreen(mediaStreamFromTrack(publication.track));
+    }
+    emitPeers();
+  });
+
+  room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
+    if (publication.source === Track.Source.ScreenShare) {
+      handlers.onLocalScreen(null);
+    }
+    emitPeers();
+  });
+
+  room.on(RoomEvent.ConnectionStateChanged, (state) => {
+    if (state === ConnectionState.Disconnected) {
+      handlers.onError("Desconectado da call.");
+    }
+    emitPeers();
+  });
+
+  handlers.onStatus("Entrando na call…");
+  await room.connect(livekitUrl, token);
+
+  try {
+    await room.localParticipant.setMicrophoneEnabled(true);
+  } catch (error) {
+    await room.disconnect();
+    throw error;
+  }
+
+  emitPeers();
+  statusCount();
 
   return {
-    selfId,
-    getPeers: () =>
-      [...peers.entries()].map(([id, state]) => ({
-        id,
-        isSelf: id === selfId,
-        ...state,
-      })),
+    selfId: room.localParticipant.identity,
+    getPeers: () => {
+      const link = roomLink();
+      return [
+        {
+          id: room.localParticipant.identity,
+          isSelf: true,
+          ...participantState(room.localParticipant, "connected"),
+        },
+        ...[...room.remoteParticipants.values()].map((participant) => ({
+          id: participant.identity,
+          isSelf: false,
+          ...participantState(participant, link),
+        })),
+      ];
+    },
     setMuted: (muted) => {
-      localMuted = muted;
-      for (const track of micStream.getAudioTracks()) track.enabled = !muted;
-      muteAction.send({ muted });
-      setPeer(selfId, { muted, speaking: muted ? false : peers.get(selfId)?.speaking ?? false });
+      void room.localParticipant.setMicrophoneEnabled(!muted);
     },
     startScreenShare: async () => {
-      if (screenStream) return;
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: true,
-        systemAudio: "include",
-      } as DisplayMediaStreamOptions);
-      screenStream = stream;
-      room.addStream(stream, { metadata: { kind: "screen" satisfies StreamKind } });
-      screenAction.send({ sharing: true });
-      setPeer(selfId, { sharing: true });
-      handlers.onLocalScreen(stream);
-      if (!stream.getAudioTracks().length) {
+      await room.localParticipant.setScreenShareEnabled(true, { audio: true });
+      const publication = room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+      if (publication?.track) {
+        handlers.onLocalScreen(mediaStreamFromTrack(publication.track));
+      }
+      if (!room.localParticipant.getTrackPublication(Track.Source.ScreenShareAudio)?.track) {
         handlers.onStatus(
           "Tela no ar. Para mandar o som, marque “Compartilhar áudio da aba” na janela do Chrome.",
         );
       }
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-        if (!left) stopScreenShare();
-      });
     },
-    stopScreenShare,
+    stopScreenShare: () => {
+      void room.localParticipant.setScreenShareEnabled(false);
+      handlers.onLocalScreen(null);
+    },
     leave: () => {
-      left = true;
-      stopScreenShare();
-      for (const stop of stopSpeaking.values()) stop();
-      stopSpeaking.clear();
-      for (const track of micStream.getTracks()) track.stop();
-      void audioCtx.close();
-      room.leave();
+      void room.disconnect();
     },
   };
 }

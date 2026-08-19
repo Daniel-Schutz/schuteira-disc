@@ -1,5 +1,5 @@
 import "./style.css";
-import { randomNick, startCall, type CallSession, type PeerInfo } from "./room";
+import { randomNick, startCall, TokenError, type CallSession, type PeerInfo } from "./room";
 
 const gate = document.querySelector<HTMLDivElement>("#gate")!;
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -285,9 +285,11 @@ joinForm.addEventListener("submit", async (event) => {
       error instanceof DOMException &&
       (error.name === "NotAllowedError" || error.name === "PermissionDeniedError");
     showError(
-      denied
-        ? "Precisa permitir o microfone para entrar na call."
-        : "Não deu para ligar o microfone. Confira se outro app não está usando ele.",
+      error instanceof TokenError
+        ? error.message
+        : denied
+          ? "Precisa permitir o microfone para entrar na call."
+          : "Não deu para ligar o microfone. Confira se outro app não está usando ele.",
     );
     joinBtn.disabled = false;
   }
