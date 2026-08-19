@@ -1,4 +1,4 @@
-import type { TurnServerConfig } from "@trystero-p2p/mqtt";
+import type { TurnServerConfig } from "trystero";
 
 const STATIC_SECRET = "openrelayprojectsecret";
 

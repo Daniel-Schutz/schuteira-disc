@@ -1,4 +1,4 @@
-import { joinRoom, selfId } from "@trystero-p2p/mqtt";
+import { joinRoom, selfId } from "trystero";
 import { getTurnConfig } from "./ice";
 
 export const APP_ID = "schuteiraDisc";
