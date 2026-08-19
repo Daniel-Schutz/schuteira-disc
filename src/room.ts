@@ -1,4 +1,5 @@
 import { joinRoom, selfId } from "@trystero-p2p/torrent";
+import { getTurnConfig } from "./ice";
 
 export const APP_ID = "schuteiraDisc";
 export const ROOM_ID = "global";
@@ -97,13 +98,16 @@ export async function startCall(
     video: false,
   });
 
-  const room = joinRoom({ appId: APP_ID }, ROOM_ID, {
-    onJoinError: (details) => {
-      handlers.onError(
-        `Não foi possível conectar com alguém na sala (${details.error}). Rede muito fechada às vezes impede o P2P.`,
-      );
+  const turnConfig = await getTurnConfig();
+
+  const room = joinRoom(
+    {
+      appId: APP_ID,
+      trickleIce: true,
+      turnConfig,
     },
-  });
+    ROOM_ID,
+  );
 
   const nickAction = room.makeAction<string>("nick");
   const muteAction = room.makeAction<{ muted: boolean }>("mute");
@@ -251,14 +255,20 @@ export async function startCall(
     startScreenShare: async () => {
       if (screenStream) return;
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 15 },
-        audio: false,
-      });
+        video: { frameRate: 30 },
+        audio: true,
+        systemAudio: "include",
+      } as DisplayMediaStreamOptions);
       screenStream = stream;
       room.addStream(stream, { metadata: { kind: "screen" satisfies StreamKind } });
       screenAction.send({ sharing: true });
       setPeer(selfId, { sharing: true });
       handlers.onLocalScreen(stream);
+      if (!stream.getAudioTracks().length) {
+        handlers.onStatus(
+          "Tela no ar. Para mandar o som, marque “Compartilhar áudio da aba” na janela do Chrome.",
+        );
+      }
       stream.getVideoTracks()[0]?.addEventListener("ended", () => {
         if (!left) stopScreenShare();
       });

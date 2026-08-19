@@ -243,6 +243,51 @@ h1 {
 .stage {
   padding: 18px;
   min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  height: 100%;
+}
+
+.stage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stage-bar-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.view-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.view-mode {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.view-mode:hover {
+  border-color: var(--accent);
+}
+
+.view-mode.active {
+  background: var(--accent);
+  color: #06210f;
+  font-weight: 700;
+  border-color: var(--accent);
 }
 
 .empty-stage {
@@ -275,6 +320,14 @@ h1 {
   display: none;
 }
 
+.screens.is-focus {
+  grid-template-columns: 1fr;
+}
+
+.screens.is-focus .screen-tile:not(.is-focused) {
+  display: none;
+}
+
 .screen-tile {
   background: #000;
   border: 1px solid var(--line);
@@ -296,6 +349,33 @@ h1 {
   padding: 8px 12px;
   font-size: 0.82rem;
   background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.screen-tile figcaption span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-focus {
+  border: 0;
+  background: #2b3531;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.tile-focus:hover {
+  background: var(--accent);
+  color: #06210f;
 }
 
 .controls {

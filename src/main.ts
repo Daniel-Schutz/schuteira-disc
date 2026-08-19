@@ -11,15 +11,20 @@ const statusEl = document.querySelector<HTMLSpanElement>("#status")!;
 const peersEl = document.querySelector<HTMLUListElement>("#peers")!;
 const screensEl = document.querySelector<HTMLDivElement>("#screens")!;
 const emptyStage = document.querySelector<HTMLDivElement>("#empty-stage")!;
+const stageBar = document.querySelector<HTMLDivElement>("#stage-bar")!;
+const viewModes = document.querySelector<HTMLDivElement>("#view-modes")!;
 const muteBtn = document.querySelector<HTMLButtonElement>("#mute-btn")!;
 const shareBtn = document.querySelector<HTMLButtonElement>("#share-btn")!;
 const leaveBtn = document.querySelector<HTMLButtonElement>("#leave-btn")!;
 
 const remoteAudio = new Map<string, HTMLAudioElement>();
+const screenAudio = new Map<string, HTMLAudioElement>();
 const screenTiles = new Map<string, HTMLElement>();
+const screenLabels = new Map<string, string>();
 let session: CallSession | null = null;
 let muted = false;
 let sharing = false;
+let focusedScreenId: string | null = null;
 let peerNames = new Map<string, string>();
 
 nickInput.value = randomNick();
@@ -62,55 +67,165 @@ function renderPeers(peers: PeerInfo[]) {
       return li;
     }),
   );
+
+  let labelsChanged = false;
+  for (const [id, tile] of screenTiles) {
+    const label = id === "self" ? "Você" : (peerNames.get(id) ?? screenLabels.get(id) ?? "Alguém");
+    if (screenLabels.get(id) === label) continue;
+    screenLabels.set(id, label);
+    const name = tile.querySelector("figcaption span");
+    if (name) name.textContent = label;
+    labelsChanged = true;
+  }
+  if (labelsChanged) applyScreenLayout();
+}
+
+function stopMediaEl(el: HTMLMediaElement | undefined) {
+  if (!el) return;
+  el.pause();
+  el.srcObject = null;
+  el.remove();
 }
 
 function syncStage() {
   emptyStage.hidden = screensEl.childElementCount > 0;
+  applyScreenLayout();
 }
 
-function upsertScreen(peerId: string, stream: MediaStream, label: string) {
+function setScreenAudio(peerId: string, stream: MediaStream | null, isSelf: boolean) {
+  stopMediaEl(screenAudio.get(peerId));
+  screenAudio.delete(peerId);
+  if (!stream || isSelf) return;
+  const tracks = stream.getAudioTracks();
+  if (!tracks.length) return;
+  const audio = new Audio();
+  audio.autoplay = true;
+  audio.srcObject = new MediaStream(tracks);
+  void audio.play().catch(() => undefined);
+  screenAudio.set(peerId, audio);
+  audio.muted = focusedScreenId !== null && focusedScreenId !== peerId;
+}
+
+function applyScreenLayout() {
+  const ids = [...screenTiles.keys()];
+  if (focusedScreenId && !screenTiles.has(focusedScreenId)) {
+    focusedScreenId = null;
+  }
+  if (ids.length < 2) {
+    focusedScreenId = null;
+    stageBar.hidden = true;
+    screensEl.classList.remove("is-focus");
+    viewModes.replaceChildren();
+  } else {
+    stageBar.hidden = false;
+    screensEl.classList.toggle("is-focus", focusedScreenId !== null);
+    const splitBtn = document.createElement("button");
+    splitBtn.type = "button";
+    splitBtn.className = `view-mode${focusedScreenId === null ? " active" : ""}`;
+    splitBtn.dataset.view = "split";
+    splitBtn.textContent = "Dividida";
+    const focusBtns = ids.map((id) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `view-mode${focusedScreenId === id ? " active" : ""}`;
+      btn.dataset.view = id;
+      btn.textContent = screenLabels.get(id) ?? "Tela";
+      return btn;
+    });
+    viewModes.replaceChildren(splitBtn, ...focusBtns);
+  }
+
+  for (const [id, tile] of screenTiles) {
+    tile.classList.toggle("is-focused", id === focusedScreenId);
+    const focusBtn = tile.querySelector<HTMLButtonElement>(".tile-focus");
+    if (focusBtn) {
+      const many = ids.length > 1;
+      focusBtn.hidden = !many;
+      focusBtn.textContent =
+        focusedScreenId === id ? "Ver todas" : "Ver só esta";
+    }
+  }
+
+  for (const [id, audio] of screenAudio) {
+    audio.muted = focusedScreenId !== null && focusedScreenId !== id;
+  }
+}
+
+function upsertScreen(peerId: string, stream: MediaStream, label: string, isSelf: boolean) {
+  screenLabels.set(peerId, label);
   let tile = screenTiles.get(peerId);
   if (!tile) {
     tile = document.createElement("figure");
     tile.className = "screen-tile";
+    tile.dataset.peerId = peerId;
     const video = document.createElement("video");
     video.autoplay = true;
     video.playsInline = true;
     video.muted = true;
     const caption = document.createElement("figcaption");
+    const name = document.createElement("span");
+    const focusBtn = document.createElement("button");
+    focusBtn.type = "button";
+    focusBtn.className = "tile-focus";
+    focusBtn.textContent = "Ver só esta";
+    caption.append(name, focusBtn);
     tile.append(video, caption);
     screensEl.append(tile);
     screenTiles.set(peerId, tile);
   }
   const video = tile.querySelector("video")!;
-  const caption = tile.querySelector("figcaption")!;
+  const name = tile.querySelector("figcaption span")!;
   video.srcObject = stream;
-  caption.textContent = label;
+  name.textContent = label;
   void video.play().catch(() => undefined);
+  setScreenAudio(peerId, stream, isSelf);
+  stream.onaddtrack = () => setScreenAudio(peerId, stream, isSelf);
+  stream.onremovetrack = () => setScreenAudio(peerId, stream, isSelf);
   syncStage();
 }
 
 function removeScreen(peerId: string) {
   const tile = screenTiles.get(peerId);
-  if (!tile) return;
-  const video = tile.querySelector("video");
-  if (video) video.srcObject = null;
-  tile.remove();
-  screenTiles.delete(peerId);
+  if (tile) {
+    const video = tile.querySelector("video");
+    if (video) video.srcObject = null;
+    tile.remove();
+    screenTiles.delete(peerId);
+  }
+  screenLabels.delete(peerId);
+  stopMediaEl(screenAudio.get(peerId));
+  screenAudio.delete(peerId);
+  if (focusedScreenId === peerId) focusedScreenId = null;
   syncStage();
 }
 
 function setRemoteAudio(peerId: string, stream: MediaStream | null) {
-  remoteAudio.get(peerId)?.pause();
-  remoteAudio.get(peerId)?.remove();
+  stopMediaEl(remoteAudio.get(peerId));
   remoteAudio.delete(peerId);
   if (!stream) return;
   const audio = new Audio();
   audio.autoplay = true;
   audio.srcObject = stream;
-  audio.play().catch(() => undefined);
+  void audio.play().catch(() => undefined);
   remoteAudio.set(peerId, audio);
 }
+
+viewModes.addEventListener("click", (event) => {
+  const btn = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-view]");
+  if (!btn) return;
+  focusedScreenId = btn.dataset.view === "split" ? null : (btn.dataset.view ?? null);
+  applyScreenLayout();
+});
+
+screensEl.addEventListener("click", (event) => {
+  const btn = (event.target as HTMLElement).closest<HTMLButtonElement>(".tile-focus");
+  if (!btn) return;
+  const tile = btn.closest<HTMLElement>(".screen-tile");
+  const peerId = tile?.dataset.peerId;
+  if (!peerId) return;
+  focusedScreenId = focusedScreenId === peerId ? null : peerId;
+  applyScreenLayout();
+});
 
 joinForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -133,7 +248,7 @@ joinForm.addEventListener("submit", async (event) => {
           removeScreen(peerId);
           return;
         }
-        upsertScreen(peerId, stream, peerNames.get(peerId) ?? "Alguém");
+        upsertScreen(peerId, stream, peerNames.get(peerId) ?? "Alguém", false);
       },
       onLocalScreen: (stream) => {
         sharing = Boolean(stream);
@@ -145,7 +260,7 @@ joinForm.addEventListener("submit", async (event) => {
           removeScreen("self");
           return;
         }
-        upsertScreen("self", stream, "Você");
+        upsertScreen("self", stream, "Você", true);
       },
     });
 
@@ -189,12 +304,12 @@ shareBtn.addEventListener("click", async () => {
 function leaveCall() {
   session?.leave();
   session = null;
-  for (const audio of remoteAudio.values()) {
-    audio.pause();
-    audio.srcObject = null;
-  }
+  for (const audio of remoteAudio.values()) stopMediaEl(audio);
   remoteAudio.clear();
+  for (const audio of screenAudio.values()) stopMediaEl(audio);
+  screenAudio.clear();
   for (const id of [...screenTiles.keys()]) removeScreen(id);
+  focusedScreenId = null;
   peersEl.replaceChildren();
   muted = false;
   sharing = false;
