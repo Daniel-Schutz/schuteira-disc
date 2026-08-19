@@ -1,35 +1,45 @@
-import { mintToken } from "../server/mintToken";
+import { AccessToken } from "livekit-server-sdk";
 
-type TokenRequest = {
-  method?: string;
-  query?: { name?: string | string[] };
-};
+export const runtime = "nodejs";
 
-type TokenResponse = {
-  status: (code: number) => TokenResponse;
-  json: (body: unknown) => void;
-};
+const ROOM_NAME = "schuteiraDisc";
 
-export default async function handler(req: TokenRequest, res: TokenResponse) {
-  if (req.method !== "GET") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
+function json(body: unknown, status = 200) {
+  return Response.json(body, { status });
+}
 
+export async function GET(request: Request) {
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   if (!apiKey || !apiSecret) {
-    res.status(500).json({ error: "LiveKit não configurado" });
-    return;
+    return json(
+      {
+        error:
+          "LiveKit não configurado. Na Vercel, defina LIVEKIT_API_KEY e LIVEKIT_API_SECRET no ambiente Production.",
+      },
+      500,
+    );
   }
 
-  const raw = req.query?.name;
-  const name = Array.isArray(raw) ? raw[0] : raw;
+  const name = new URL(request.url).searchParams.get("name") ?? "Visitante";
+  const nick = name.trim().slice(0, 24) || "Visitante";
 
   try {
-    const token = await mintToken({ apiKey, apiSecret, name: name ?? "Visitante" });
-    res.status(200).json({ token });
-  } catch {
-    res.status(500).json({ error: "Não deu para criar o token" });
+    const token = new AccessToken(apiKey, apiSecret, {
+      identity: `${nick}-${crypto.randomUUID()}`,
+      name: nick,
+      ttl: "6h",
+    });
+    token.addGrant({
+      roomJoin: true,
+      room: ROOM_NAME,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    return json({ token: await token.toJwt() });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "erro desconhecido";
+    return json({ error: `Não deu para criar o token (${detail})` }, 500);
   }
 }

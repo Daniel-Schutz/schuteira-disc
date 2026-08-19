@@ -67,12 +67,14 @@ function participantState(participant: Participant, link: LinkState): PeerState 
 
 async function fetchJoinToken(name: string): Promise<string> {
   const response = await fetch(`/api/token?name=${encodeURIComponent(name)}`);
-  if (!response.ok) {
-    throw new TokenError("Não deu para entrar. Confira as chaves do LiveKit.");
+  let body: { token?: string; error?: string } = {};
+  try {
+    body = (await response.json()) as { token?: string; error?: string };
+  } catch {
+    body = {};
   }
-  const body = (await response.json()) as { token?: string };
-  if (!body.token) {
-    throw new TokenError("Não deu para entrar. Confira as chaves do LiveKit.");
+  if (!response.ok || !body.token) {
+    throw new TokenError(body.error ?? "Não deu para entrar. Confira as chaves do LiveKit na Vercel.");
   }
   return body.token;
 }
